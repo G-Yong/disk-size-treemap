@@ -4,7 +4,7 @@
   "description": "Visualize workspace file and folder sizes as an interactive squarified treemap",
   "version": "0.0.1",
   "publisher": "G-Yong",
-  "icon": "icon.png",
+  "icon": "image/icon.png",
   "repository": {
     "type": "git",
     "url": "https://github.com/G-Yong/disk-size-treemap"
