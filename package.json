@@ -1,0 +1,41 @@
+{
+  "name": "disk-size-treemap",
+  "displayName": "Disk Size Treemap",
+  "description": "Visualize workspace file and folder sizes as an interactive squarified treemap",
+  "version": "0.0.1",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other",
+    "Visualization"
+  ],
+  "activationEvents": [],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "workspace-size-treemap.show",
+        "title": "Show Disk Size Treemap"
+      }
+    ],
+    "menus": {
+      "explorer/context": [
+        {
+          "command": "disk-size-treemap.show",
+          "group": "navigation"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.85.0",
+    "@types/node": "^20.0.0",
+    "typescript": "^5.0.0"
+  }
+}
