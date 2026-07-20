@@ -1,6 +1,8 @@
 # Disk Size Treemap
 
-VS Code extension: visualize workspace file and folder sizes as an interactive squarified treemap. Supports three view modes: file structure treemap, file type distribution, and largest files table.
+> Interactive treemap visualization — see where your disk space goes at a glance. 交互式 Treemap 可视化工具 — 一眼看清工作区文件和文件夹的磁盘占用分布。
+
+English | [中文](https://github.com/G-Yong/disk-size-treemap/blob/main/README_CN.md)
 
 - [GitHub](https://github.com/G-Yong/disk-size-treemap)
 - [Marketplace](https://marketplace.visualstudio.com/items?itemName=G-Yong.disk-size-treemap)
