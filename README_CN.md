@@ -1,7 +1,5 @@
 # Disk Size Treemap
 
-> 交互式 Treemap 可视化工具 — 一眼看清工作区文件和文件夹的磁盘占用分布。
-
 [English](https://github.com/G-Yong/disk-size-treemap/blob/main/README.md) | 中文
 
 - [GitHub](https://github.com/G-Yong/disk-size-treemap)
