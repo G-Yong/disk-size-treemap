@@ -10,11 +10,13 @@ export class TreemapPanel {
     private _currentPath: string;
     private _fullTree: FileNode | null = null;
     private _workspaceRoot: string;
+    private readonly _extensionUri: vscode.Uri;
 
-    private constructor(panel: vscode.WebviewPanel, workspaceRoot: string) {
+    private constructor(panel: vscode.WebviewPanel, workspaceRoot: string, extensionUri: vscode.Uri, startPath: string) {
         this._panel = panel;
-        this._currentPath = workspaceRoot;
         this._workspaceRoot = workspaceRoot;
+        this._extensionUri = extensionUri;
+        this._currentPath = startPath;
 
         this._panel.onDidDispose(() => this.dispose(), null, this._disposables);
         this._panel.webview.onDidReceiveMessage(
@@ -24,20 +26,44 @@ export class TreemapPanel {
         );
 
         this._panel.webview.html = this._getHtml();
-        this._scanFullAndSend(workspaceRoot);
+        this._scanFullAndSend(startPath);
     }
 
-    public static createOrShow(context: vscode.ExtensionContext): void {
+    /**
+     * Resolve the target path from a context-menu URI:
+     * - File: show its parent directory
+     * - Folder: show that folder
+     * - No URI: show workspace root
+     */
+    private static _resolveTargetPath(uri: vscode.Uri | undefined, workspaceRoot: string): string {
+        if (!uri) {
+            return workspaceRoot;
+        }
+        const fsPath = uri.fsPath;
+        try {
+            const stats = fs.statSync(fsPath);
+            if (stats.isFile()) {
+                return path.dirname(fsPath);
+            }
+            // It's a directory
+            return fsPath;
+        } catch {
+            return workspaceRoot;
+        }
+    }
+
+    public static createOrShow(context: vscode.ExtensionContext, uri?: vscode.Uri): void {
         const workspaceFolders = vscode.workspace.workspaceFolders;
         if (!workspaceFolders || workspaceFolders.length === 0) {
             vscode.window.showErrorMessage('No workspace folder is open.');
             return;
         }
         const workspaceRoot = workspaceFolders[0].uri.fsPath;
+        const targetPath = TreemapPanel._resolveTargetPath(uri, workspaceRoot);
 
         if (TreemapPanel.currentPanel) {
             TreemapPanel.currentPanel._panel.reveal(vscode.ViewColumn.One);
-            TreemapPanel.currentPanel._scanCurrentAndSend(workspaceRoot);
+            TreemapPanel.currentPanel._scanCurrentAndSend(targetPath);
             return;
         }
 
@@ -48,11 +74,13 @@ export class TreemapPanel {
             {
                 enableScripts: true,
                 retainContextWhenHidden: true,
-                localResourceRoots: []
+                localResourceRoots: [
+                    vscode.Uri.joinPath(context.extensionUri, 'node_modules', '@vscode/codicons', 'dist')
+                ]
             }
         );
 
-        TreemapPanel.currentPanel = new TreemapPanel(panel, workspaceRoot);
+        TreemapPanel.currentPanel = new TreemapPanel(panel, workspaceRoot, context.extensionUri, targetPath);
     }
 
     /** First-time scan: scan both full workspace and send current-level view. */
@@ -157,21 +185,26 @@ export class TreemapPanel {
             // fallback: webview files may not be available during development
         }
 
+        const codiconUri = this._panel.webview.asWebviewUri(
+            vscode.Uri.joinPath(this._extensionUri, 'node_modules', '@vscode/codicons', 'dist', 'codicon.css')
+        );
+
         return `<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src https://d3js.org 'unsafe-inline'; style-src 'unsafe-inline';">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src https://d3js.org 'unsafe-inline'; style-src ${this._panel.webview.cspSource} 'unsafe-inline'; font-src ${this._panel.webview.cspSource};">
     <title>Disk Size Treemap</title>
+    <link rel="stylesheet" href="${codiconUri}" />
     <style>${css}</style>
 </head>
 <body>
     <div id="toolbar">
         <div class="view-tabs">
-            <button class="tab active" data-view="structure">📁 File Structure</button>
-            <button class="tab" data-view="types">🎨 File Types</button>
-            <button class="tab" data-view="largest">📊 Largest Files</button>
+            <button class="tab active" data-view="structure"><i class="codicon codicon-folder"></i> File Structure</button>
+            <button class="tab" data-view="types"><i class="codicon codicon-symbol-color"></i> File Types</button>
+            <button class="tab" data-view="largest"><i class="codicon codicon-graph"></i> Largest Files</button>
         </div>
         <div class="toolbar-options">
             <label id="largest-controls" class="hidden">
@@ -188,6 +221,12 @@ export class TreemapPanel {
     <div id="treemap"></div>
     <div id="table-view" class="hidden"></div>
     <div id="tooltip" class="tooltip hidden"></div>
+    <!-- Hidden element to extract codicon Unicode code points -->
+    <div id="codicon-refs" style="display:none;" aria-hidden="true">
+        <i class="codicon codicon-folder"></i>
+        <i class="codicon codicon-file"></i>
+        <i class="codicon codicon-go-to-file"></i>
+    </div>
     <script src="https://d3js.org/d3.v7.min.js"></script>
     <script>${js}</script>
 </body>

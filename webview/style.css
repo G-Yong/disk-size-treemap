@@ -166,3 +166,35 @@ body {
 .tooltip.hidden {
     display: none;
 }
+
+/* ---- Codicon icons (use VS Code's codicon font) ---- */
+.codicon-icon {
+    font-family: 'codicon';
+    font-size: 14px;
+    speak: none;
+    display: inline-block;
+    vertical-align: middle;
+    margin-right: 2px;
+}
+
+/* In SVG treemap labels, the first tspan is the codicon character */
+.codicon-char {
+    font-family: 'codicon';
+    font-size: 12px;
+}
+
+/* Tab buttons: codicon inside <i> */
+.tab .codicon {
+    vertical-align: middle;
+    margin-right: 2px;
+    font-size: 13px;
+}
+
+/* Table view codicon file icon */
+#table-view .codicon-icon {
+    font-family: 'codicon';
+    font-size: 14px;
+    margin-right: 4px;
+    vertical-align: middle;
+    color: var(--vscode-descriptionForeground, #717171);
+}
