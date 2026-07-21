@@ -80,6 +80,9 @@ export class TreemapPanel {
             }
         );
 
+        // iconPath added in VS Code 1.94; use cast for older @types/vscode compatibility
+        (panel as any).iconPath = vscode.Uri.joinPath(context.extensionUri, 'image', 'icon.png');
+
         TreemapPanel.currentPanel = new TreemapPanel(panel, workspaceRoot, context.extensionUri, targetPath);
     }
 
