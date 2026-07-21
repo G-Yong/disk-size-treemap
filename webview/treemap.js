@@ -361,7 +361,11 @@ function renderStructure(tree, dirPath) {
                 vscode.postMessage({ command: 'revealInExplorer', path: d.path });
             }
         },
-        null
+        function(d) {  // dblclick: open file in editor
+            if (!d.isDirectory) {
+                vscode.postMessage({ command: 'openFile', path: d.path });
+            }
+        }
     );
 }
 
@@ -456,6 +460,11 @@ function renderLargestFiles(tree, dirPath, n) {
         tr.addEventListener('click', function() {
             var fp = tr.getAttribute('data-path');
             if (fp) { vscode.postMessage({ command: 'revealInExplorer', path: fp }); }
+        });
+        // Double-click table row → open file in editor
+        tr.addEventListener('dblclick', function() {
+            var fp = tr.getAttribute('data-path');
+            if (fp) { vscode.postMessage({ command: 'openFile', path: fp }); }
         });
     });
 }

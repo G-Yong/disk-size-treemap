@@ -163,6 +163,11 @@ export class TreemapPanel {
                     vscode.commands.executeCommand('revealInExplorer', vscode.Uri.file(msg.path));
                 }
                 break;
+            case 'openFile':
+                if (msg.path) {
+                    vscode.commands.executeCommand('vscode.open', vscode.Uri.file(msg.path));
+                }
+                break;
             case 'goUp':
                 if (this._currentPath) {
                     const parent = path.dirname(this._currentPath);
