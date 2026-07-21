@@ -1,27 +1,81 @@
-// ---- Codicon character extraction ----
-// Extract the Unicode code point from codicon CSS ::before content
-var CODICON_CHARS = { folder: '\uD83D\uDCC1', file: '\uD83D\uDCC4' }; // fallback to emojis
+// ---- Codicon character code points (from @vscode/codicons) ----
+// Stable Unicode Private Use Area code points used by the bundled codicon font.
+var CODICON_CHARS = {
+    folder:    '\uea83',  // codicon-folder
+    file:      '\uea7b',  // codicon-file       (generic / text)
+    fileCode:  '\ueae9',  // codicon-file-code  (source code)
+    fileMedia: '\ueaea',  // codicon-file-media (images / audio / video)
+    filePdf:   '\ueaeb',  // codicon-file-pdf
+    fileZip:   '\ueaef',  // codicon-file-zip   (archives)
+    fileBin:   '\ueae8'   // codicon-file-binary
+};
 
-(function extractCodicons() {
-    var refs = document.getElementById('codicon-refs');
-    if (!refs) { return; }
-    var icons = refs.querySelectorAll('i');
-    for (var i = 0; i < icons.length; i++) {
-        var el = icons[i];
-        var cls = el.className.replace('codicon ', '').replace('codicon-', '');
-        try {
-            var style = getComputedStyle(el, '::before');
-            var content = style.content;
-            // content is like '\"\\ea83\"' → extract the char
-            if (content && content !== 'none') {
-                // Remove surrounding quotes
-                var charCode = content.replace(/^["']|["']$/g, '');
-                // charCode is a JS escape like '\ea83' — parse it
-                CODICON_CHARS[cls] = JSON.parse('"' + charCode + '"');
-            }
-        } catch (e) { /* keep fallback */ }
-    }
+// ---- Extension → icon category ----
+var EXT_ICON_MAP = (function () {
+    var code   = 'fileCode';
+    var media  = 'fileMedia';
+    var zip    = 'fileZip';
+    var bin    = 'fileBin';
+    var pdf    = 'filePdf';
+    // anything not listed falls back to generic 'file'
+
+    var map = {};
+
+    // Source code / markup / config
+    [
+        'js','ts','jsx','tsx','mjs','cjs','mts','cts',
+        'css','scss','sass','less',
+        'html','htm','xml','svg',
+        'md','mdx','markdown',
+        'json','yaml','yml','toml','ini','cfg','conf','env','properties',
+        'lock','gitignore','gitattributes','gitmodules',
+        'py','ipynb',
+        'c','cpp','cc','cxx','h','hpp','hxx','hh','cu','cuh',
+        'java','kt','kts','scala','groovy','clj',
+        'go','rs','rlib','zig',
+        'rb','erb','rake','gemspec',
+        'php','phtml',
+        'swift','m','mm',
+        'cs','fs','fsi','fsx','vb',
+        'sh','bash','zsh','fish','bat','cmd','ps1','psd1','psm1',
+        'dockerfile','tf','tfvars','hcl','proto',
+        'sql','graphql','gql','vue','svelte','astro',
+        'r','jl','lua','dart','nim','cr','ex','exs','erl','hrl',
+        'dockerfile','makefile'
+    ].forEach(function (e) { map[e] = code; });
+
+    // Images / audio / video
+    [
+        'png','jpg','jpeg','gif','webp','ico','bmp','tiff','tif','psd','ai','eps',
+        'mp4','mov','avi','mkv','webm','flv','wmv',
+        'mp3','wav','flac','ogg','aac','wma','m4a'
+    ].forEach(function (e) { map[e] = media; });
+
+    // Archives
+    [
+        'zip','rar','7z','tar','gz','bz2','xz','zst','cab','iso'
+    ].forEach(function (e) { map[e] = zip; });
+
+    // Binaries
+    [
+        'exe','dll','so','dylib','wasm','bin','obj','o','a','lib',
+        'class','pyc','pyo','db','sqlite'
+    ].forEach(function (e) { map[e] = bin; });
+
+    // PDF / office docs
+    [
+        'pdf'
+    ].forEach(function (e) { map[e] = pdf; });
+
+    return map;
 })();
+
+function getNodeIcon(d) {
+    if (d.isDirectory) { return CODICON_CHARS.folder; }
+    var ext = d.name.includes('.') ? d.name.split('.').pop().toLowerCase() : '';
+    var category = EXT_ICON_MAP[ext] || 'file';
+    return CODICON_CHARS[category];
+}
 
 // File extension → color mapping
 var EXT_COLORS = {
@@ -194,7 +248,7 @@ function renderTreemapSVG(dataArray, containerEl, getColorFn, onClickFn, onDblCl
         })
         .on('mouseenter', function(event, d) {
             tooltip.classList.remove('hidden');
-            var icon = d.data.isDirectory ? CODICON_CHARS.folder : CODICON_CHARS.file;
+            var icon = getNodeIcon(d.data);
             var typeLabel = d.data.isDirectory ? 'Folder: ' : 'File: ';
             tooltip.innerHTML = '<span class="codicon-icon">' + icon + '</span> ' + typeLabel + '<strong>' + d.data.name + '</strong><br>' +
                 formatSize(d.data.size) + ' (' + d.data.size.toLocaleString() + ' bytes)';
@@ -226,7 +280,7 @@ function renderTreemapSVG(dataArray, containerEl, getColorFn, onClickFn, onDblCl
             var w = d.x1 - d.x0, h = d.y1 - d.y0;
             if (w < 16 || h < 12) { return ''; }
             var maxChars = Math.floor(w / 7);
-            var icon = d.data.isDirectory ? CODICON_CHARS.folder : CODICON_CHARS.file;
+            var icon = getNodeIcon(d.data);
             var displayName = icon + ' ' + d.data.name;
             if (displayName.length <= maxChars) { return displayName; }
             return displayName.substring(0, Math.max(0, maxChars - 2)) + '\u2026';
@@ -388,7 +442,7 @@ function renderLargestFiles(tree, dirPath, n) {
         html += '<tr data-path="' + f.path.replace(/"/g, '&quot;') + '">' +
             '<td class="col-rank">' + (i + 1) + '</td>' +
             '<td class="col-path">' +
-                '<span class="codicon-icon">' + CODICON_CHARS.file + '</span>' +
+                '<span class="codicon-icon">' + getNodeIcon(f) + '</span>' +
                 '<span class="path-cell">' + f.path + '</span>' +
             '</td>' +
             '<td class="col-size">' + formatSize(f.size) + '</td>' +

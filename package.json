@@ -36,9 +36,10 @@
     }
   },
   "scripts": {
-    "vscode:prepublish": "npm run compile",
+    "vscode:prepublish": "npm run copy-codicons && npm run compile",
     "compile": "tsc -p ./",
-    "watch": "tsc -watch -p ./"
+    "watch": "tsc -watch -p ./",
+    "copy-codicons": "node -e \"const fs=require('fs'),p=require('path');const d=p.join('webview','codicons');fs.mkdirSync(d,{recursive:true});['codicon.css','codicon.ttf'].forEach(f=>fs.copyFileSync(p.join('node_modules','@vscode','codicons','dist',f),p.join(d,f)));console.log('Codicons copied.')\""
   },
   "dependencies": {
     "@vscode/codicons": "^0.0.35"

@@ -75,7 +75,7 @@ export class TreemapPanel {
                 enableScripts: true,
                 retainContextWhenHidden: true,
                 localResourceRoots: [
-                    vscode.Uri.joinPath(context.extensionUri, 'node_modules', '@vscode/codicons', 'dist')
+                    vscode.Uri.joinPath(context.extensionUri, 'webview')
                 ]
             }
         );
@@ -186,7 +186,7 @@ export class TreemapPanel {
         }
 
         const codiconUri = this._panel.webview.asWebviewUri(
-            vscode.Uri.joinPath(this._extensionUri, 'node_modules', '@vscode/codicons', 'dist', 'codicon.css')
+            vscode.Uri.joinPath(this._extensionUri, 'webview', 'codicons', 'codicon.css')
         );
 
         return `<!DOCTYPE html>
@@ -221,12 +221,6 @@ export class TreemapPanel {
     <div id="treemap"></div>
     <div id="table-view" class="hidden"></div>
     <div id="tooltip" class="tooltip hidden"></div>
-    <!-- Hidden element to extract codicon Unicode code points -->
-    <div id="codicon-refs" style="display:none;" aria-hidden="true">
-        <i class="codicon codicon-folder"></i>
-        <i class="codicon codicon-file"></i>
-        <i class="codicon codicon-go-to-file"></i>
-    </div>
     <script src="https://d3js.org/d3.v7.min.js"></script>
     <script>${js}</script>
 </body>
