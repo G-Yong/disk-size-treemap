@@ -17,9 +17,26 @@
 
 ### 打开 Treemap
 
-在**资源管理器**空白区域右键，选择 **"Show Disk Size Treemap"**。
+在**资源管理器**中右键，选择 **"Show Disk Size Treemap"**：
 
-也可以通过命令面板（`Ctrl+Shift+P`）运行同名命令。
+- **空白区域** — 展示完整工作区树
+- **文件夹上** — 直接展示该文件夹的内容
+- **文件上** — 展示文件所在父目录的内容，便于查看同级文件
+
+也可以通过命令面板（`Ctrl+Shift+P`）运行同名命令，默认扫描工作区根目录。
+
+### 图标
+
+文件和文件夹图标使用 [VS Code Codicons](https://microsoft.github.io/vscode-codicons/)，与编辑器风格保持一致。根据文件扩展名自动选择合适的图标：
+
+| 图标 | 类别 | 示例 |
+|------|------|------|
+| `codicon-file-code` | 源代码 | `.js`, `.ts`, `.py`, `.cpp`, `.java`, `.rs`, `.go`, `.css`, `.html` |
+| `codicon-file-media` | 图片和媒体 | `.png`, `.jpg`, `.gif`, `.mp4`, `.mp3`, `.wav` |
+| `codicon-file-zip` | 压缩包 | `.zip`, `.rar`, `.7z`, `.tar.gz` |
+| `codicon-file-binary` | 二进制 | `.exe`, `.dll`, `.wasm`, `.class` |
+| `codicon-file-pdf` | PDF | `.pdf` |
+| `codicon-file` | 其他文件 | `.txt`, `.docx`, `.xlsx`, `.log` |
 
 ### 切换视图
 

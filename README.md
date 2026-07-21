@@ -17,9 +17,26 @@ English | [中文](https://github.com/G-Yong/disk-size-treemap/blob/main/README_
 
 ### Open the Treemap
 
-Right-click in the **Explorer** empty area and select **"Show Disk Size Treemap"**.
+Right-click in the **Explorer** and select **"Show Disk Size Treemap"**:
 
-Alternatively, open the Command Palette (`Ctrl+Shift+P`) and run the same command.
+- **Empty area** — shows the full workspace tree
+- **On a folder** — shows that folder's contents directly
+- **On a file** — shows the file's parent folder, so you can see its siblings in context
+
+You can also open the Command Palette (`Ctrl+Shift+P`) and run the same command to scan the workspace root.
+
+### Icons
+
+File and folder icons use [VS Code Codicons](https://microsoft.github.io/vscode-codicons/), keeping the visual style consistent with the rest of your editor. Icons are automatically chosen based on file extension:
+
+| Icon | Category | Examples |
+|------|----------|----------|
+| `codicon-file-code` | Source code | `.js`, `.ts`, `.py`, `.cpp`, `.java`, `.rs`, `.go`, `.css`, `.html` |
+| `codicon-file-media` | Images & media | `.png`, `.jpg`, `.gif`, `.mp4`, `.mp3`, `.wav` |
+| `codicon-file-zip` | Archives | `.zip`, `.rar`, `.7z`, `.tar.gz` |
+| `codicon-file-binary` | Binaries | `.exe`, `.dll`, `.wasm`, `.class` |
+| `codicon-file-pdf` | PDF | `.pdf` |
+| `codicon-file` | Other files | `.txt`, `.docx`, `.xlsx`, `.log` |
 
 ### Switch Views
 
