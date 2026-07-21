@@ -261,12 +261,14 @@ function renderStructure(tree, dirPath) {
     });
 
     renderTreemapSVG(flatChildren, treemapDiv, null,
-        function(d) {  // click
-            if (d.isDirectory) { vscode.postMessage({ command: 'drillDown', path: d.path }); }
+        function(d) {  // click: drill down for directories, reveal for files
+            if (d.isDirectory) {
+                vscode.postMessage({ command: 'drillDown', path: d.path });
+            } else {
+                vscode.postMessage({ command: 'revealInExplorer', path: d.path });
+            }
         },
-        function(d) {  // dblclick / contextmenu
-            vscode.postMessage({ command: 'revealInExplorer', path: d.path });
-        }
+        null
     );
 }
 
@@ -356,9 +358,9 @@ function renderLargestFiles(tree, dirPath, n) {
     html += '</tbody></table>';
     tableView.innerHTML = html;
 
-    // Double-click table row → reveal in OS explorer
+    // Single-click table row → reveal in explorer
     tableView.querySelectorAll('tr[data-path]').forEach(function(tr) {
-        tr.addEventListener('dblclick', function() {
+        tr.addEventListener('click', function() {
             var fp = tr.getAttribute('data-path');
             if (fp) { vscode.postMessage({ command: 'revealInExplorer', path: fp }); }
         });

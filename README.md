@@ -7,9 +7,11 @@ English | [中文](https://github.com/G-Yong/disk-size-treemap/blob/main/README_
 
 ## Features
 
-- 📁 **File Structure View** — Interactive squarified treemap showing files and folders proportional to their size. Click folders to drill down, double-click to reveal in OS explorer.
+- 📁 **File Structure View** — Interactive squarified treemap showing files and folders proportional to their size. Click folders to drill down, click files to reveal in VS Code Explorer.
 - 🎨 **File Types View** — Aggregate treemap by file extension, showing which types consume the most disk space. Click any type to jump to its largest files.
-- 📊 **Largest Files View** — Sortable table of the largest files in the workspace, filterable by file type. Double-click rows to open in explorer.
+- 📊 **Largest Files View** — Sortable table of the largest files in the workspace, filterable by file type. Click rows to reveal in explorer.
+
+![](image/operation.webp)
 
 ## Usage
 
@@ -36,8 +38,7 @@ In the **Largest Files** view, use the dropdown to filter by a specific file ext
 ### Interact
 
 - **Click** a folder in File Structure view to drill down
-- **Double-click** any tile/row to reveal the file in your OS file explorer
-- **Right-click** any tile to reveal in OS explorer
+- **Click** any file tile or table row to reveal it in the VS Code Explorer
 - Hover over tiles for detailed size information
 
 ## Color Legend

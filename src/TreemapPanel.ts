@@ -132,7 +132,7 @@ export class TreemapPanel {
                 break;
             case 'revealInExplorer':
                 if (msg.path) {
-                    vscode.commands.executeCommand('revealFileInOS', vscode.Uri.file(msg.path));
+                    vscode.commands.executeCommand('revealInExplorer', vscode.Uri.file(msg.path));
                 }
                 break;
             case 'goUp':
