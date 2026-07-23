@@ -3,5 +3,6 @@
 .gitignore
 src/**
 node_modules/**
+out/**/*.map
 tsconfig.json
 image/operation.webp
