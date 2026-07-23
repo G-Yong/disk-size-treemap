@@ -11,6 +11,7 @@ export class TreemapPanel {
     private _fullTree: FileNode | null = null;
     private _workspaceRoot: string;
     private readonly _extensionUri: vscode.Uri;
+    private _refreshDebounceTimer: ReturnType<typeof setTimeout> | undefined;
 
     private constructor(panel: vscode.WebviewPanel, workspaceRoot: string, extensionUri: vscode.Uri, startPath: string) {
         this._panel = panel;
@@ -26,7 +27,33 @@ export class TreemapPanel {
         );
 
         this._panel.webview.html = this._getHtml();
-        this._scanFullAndSend(startPath);
+        void this._scanFullAndSend(startPath);
+
+        // Watch for file system changes and invalidate the cache.
+        const watcher = vscode.workspace.createFileSystemWatcher(
+            new vscode.RelativePattern(workspaceRoot, '**/*')
+        );
+        const onFsChange = () => {
+            // Immediately mark cache stale so any in-flight navigation
+            // that finishes later will re-scan rather than use old data.
+            this._fullTree = null;
+
+            // Debounce: only trigger a visible refresh after changes settle.
+            if (this._refreshDebounceTimer !== undefined) {
+                clearTimeout(this._refreshDebounceTimer);
+            }
+            this._refreshDebounceTimer = setTimeout(() => {
+                this._refreshDebounceTimer = undefined;
+                if (this._panel.visible) {
+                    void this._scanFullAndSend(this._currentPath);
+                }
+                // If not visible, cache is already null — next reveal will re-scan.
+            }, 1500);
+        };
+        watcher.onDidCreate(onFsChange, null, this._disposables);
+        watcher.onDidDelete(onFsChange, null, this._disposables);
+        watcher.onDidChange(onFsChange, null, this._disposables);
+        this._disposables.push(watcher);
     }
 
     /**
@@ -63,7 +90,7 @@ export class TreemapPanel {
 
         if (TreemapPanel.currentPanel) {
             TreemapPanel.currentPanel._panel.reveal(vscode.ViewColumn.One);
-            TreemapPanel.currentPanel._scanCurrentAndSend(targetPath);
+            void TreemapPanel.currentPanel._scanCurrentAndSend(targetPath);
             return;
         }
 
@@ -87,45 +114,48 @@ export class TreemapPanel {
     }
 
     /** First-time scan: scan both full workspace and send current-level view. */
-    private _scanFullAndSend(rootPath: string): void {
+    private async _scanFullAndSend(rootPath: string): Promise<void> {
         this._currentPath = rootPath;
         this._panel.webview.postMessage({ type: 'scanning', path: rootPath });
 
-        setTimeout(() => {
-            // Scan full workspace once, cache it
-            this._fullTree = scanDirectory(this._workspaceRoot);
+        // Scan the full workspace once, cache it. The async scanner yields to
+        // the event loop, so the 'scanning' message renders before results.
+        this._fullTree = await scanDirectory(this._workspaceRoot);
 
-            // For the current-level tree, we need to find the subtree at currentPath
-            const currentTree = this._findSubtree(this._fullTree, rootPath) || this._fullTree;
+        // For the current-level tree, find the subtree at currentPath.
+        const currentTree = this._findSubtree(this._fullTree, rootPath) || this._fullTree;
 
-            this._panel.webview.postMessage({
-                type: 'treeData',
-                tree: this._serializeTree(currentTree),
-                fullTree: this._serializeTree(this._fullTree),
-                currentPath: rootPath
-            });
-        }, 0);
+        this._panel.webview.postMessage({
+            type: 'treeData',
+            tree: this._serializeTree(currentTree),
+            fullTree: this._serializeTree(this._fullTree),
+            currentPath: rootPath
+        });
     }
 
-    /** Drill-down: scan only the requested subtree, but keep fullTree cached. */
-    private _scanCurrentAndSend(rootPath: string): void {
+    /** Drill-down: reuse the cached fullTree subtree; only re-scan if not cached. */
+    private async _scanCurrentAndSend(rootPath: string): Promise<void> {
         this._currentPath = rootPath;
-        this._panel.webview.postMessage({ type: 'scanning', path: rootPath });
 
-        setTimeout(() => {
-            // Re-use cached fullTree if available; re-scan if not
-            if (!this._fullTree) {
-                this._fullTree = scanDirectory(this._workspaceRoot);
-            }
-            const currentTree = scanDirectory(rootPath);
+        if (!this._fullTree) {
+            this._panel.webview.postMessage({ type: 'scanning', path: rootPath });
+            this._fullTree = await scanDirectory(this._workspaceRoot);
+        }
 
-            this._panel.webview.postMessage({
-                type: 'treeData',
-                tree: this._serializeTree(currentTree),
-                fullTree: this._serializeTree(this._fullTree),
-                currentPath: rootPath
-            });
-        }, 0);
+        // Prefer the cached subtree — no filesystem work needed for drill-down.
+        let currentTree = this._findSubtree(this._fullTree, rootPath);
+        if (!currentTree) {
+            // Path outside the cached tree (rare): scan it directly.
+            this._panel.webview.postMessage({ type: 'scanning', path: rootPath });
+            currentTree = await scanDirectory(rootPath);
+        }
+
+        this._panel.webview.postMessage({
+            type: 'treeData',
+            tree: this._serializeTree(currentTree),
+            fullTree: this._serializeTree(this._fullTree),
+            currentPath: rootPath
+        });
     }
 
     /** Find the node at targetPath within the tree. */
@@ -158,7 +188,7 @@ export class TreemapPanel {
         switch (msg.command) {
             case 'drillDown':
                 if (msg.path) {
-                    this._scanCurrentAndSend(msg.path);
+                    void this._scanCurrentAndSend(msg.path);
                 }
                 break;
             case 'revealInExplorer':
@@ -175,7 +205,7 @@ export class TreemapPanel {
                 if (this._currentPath) {
                     const parent = path.dirname(this._currentPath);
                     if (parent !== this._currentPath) {
-                        this._scanCurrentAndSend(parent);
+                        void this._scanCurrentAndSend(parent);
                     }
                 }
                 break;
@@ -196,13 +226,16 @@ export class TreemapPanel {
         const codiconUri = this._panel.webview.asWebviewUri(
             vscode.Uri.joinPath(this._extensionUri, 'webview', 'codicons', 'codicon.css')
         );
+        const d3Uri = this._panel.webview.asWebviewUri(
+            vscode.Uri.joinPath(this._extensionUri, 'webview', 'd3', 'd3.min.js')
+        );
 
         return `<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src https://d3js.org 'unsafe-inline'; style-src ${this._panel.webview.cspSource} 'unsafe-inline'; font-src ${this._panel.webview.cspSource};">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src ${this._panel.webview.cspSource} 'unsafe-inline'; style-src ${this._panel.webview.cspSource} 'unsafe-inline'; font-src ${this._panel.webview.cspSource};">
     <title>Disk Size Treemap</title>
     <link rel="stylesheet" href="${codiconUri}" />
     <style>${css}</style>
@@ -229,7 +262,7 @@ export class TreemapPanel {
     <div id="treemap"></div>
     <div id="table-view" class="hidden"></div>
     <div id="tooltip" class="tooltip hidden"></div>
-    <script src="https://d3js.org/d3.v7.min.js"></script>
+    <script src="${d3Uri}"></script>
     <script>${js}</script>
 </body>
 </html>`;
@@ -237,6 +270,9 @@ export class TreemapPanel {
 
     public dispose(): void {
         TreemapPanel.currentPanel = undefined;
+        if (this._refreshDebounceTimer !== undefined) {
+            clearTimeout(this._refreshDebounceTimer);
+        }
         this._panel.dispose();
         while (this._disposables.length) {
             const d = this._disposables.pop();

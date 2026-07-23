@@ -2,7 +2,7 @@
   "name": "disk-size-treemap",
   "displayName": "Disk Size Treemap",
   "description": "Visualize workspace file and folder sizes as an interactive squarified treemap",
-  "version": "0.0.6",
+  "version": "0.0.7",
   "publisher": "G-Yong",
   "icon": "image/icon.png",
   "repository": {
@@ -36,17 +36,19 @@
     }
   },
   "scripts": {
-    "vscode:prepublish": "npm run copy-codicons && npm run compile",
+    "vscode:prepublish": "npm run copy-codicons && npm run copy-d3 && npm run compile",
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
-    "copy-codicons": "node -e \"const fs=require('fs'),p=require('path');const d=p.join('webview','codicons');fs.mkdirSync(d,{recursive:true});['codicon.css','codicon.ttf'].forEach(f=>fs.copyFileSync(p.join('node_modules','@vscode','codicons','dist',f),p.join(d,f)));console.log('Codicons copied.')\""
+    "copy-codicons": "node -e \"const fs=require('fs'),p=require('path');const d=p.join('webview','codicons');fs.mkdirSync(d,{recursive:true});['codicon.css','codicon.ttf'].forEach(f=>fs.copyFileSync(p.join('node_modules','@vscode','codicons','dist',f),p.join(d,f)));console.log('Codicons copied.')\"",
+    "copy-d3": "node -e \"const fs=require('fs'),p=require('path');const d=p.join('webview','d3');fs.mkdirSync(d,{recursive:true});fs.copyFileSync(p.join('node_modules','d3','dist','d3.min.js'),p.join(d,'d3.min.js'));console.log('D3 copied.')\""
   },
   "dependencies": {
-    "@vscode/codicons": "^0.0.35"
+    "@vscode/codicons": "^0.0.35",
+    "d3": "^7.9.0"
   },
   "devDependencies": {
-    "@types/vscode": "^1.85.0",
     "@types/node": "^20.0.0",
+    "@types/vscode": "^1.85.0",
     "typescript": "^5.0.0"
   }
 }
