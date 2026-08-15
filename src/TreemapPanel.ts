@@ -1,17 +1,19 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs';
-import { scanDirectory, FileNode } from './FileScanner';
+import { scanDirectory, FileNode, ScanResult, ScanControl, topLevelEntries } from './FileScanner';
 
 export class TreemapPanel {
     public static currentPanel: TreemapPanel | undefined;
     private readonly _panel: vscode.WebviewPanel;
     private _disposables: vscode.Disposable[] = [];
     private _currentPath: string;
-    private _fullTree: FileNode | null = null;
-    private _workspaceRoot: string;
+    private _scannedTree: FileNode | null = null;
+    private _scanResult: ScanResult | null = null;
+    private _scanControl: ScanControl | null = null;
+    private _scanToken = 0;
+    private readonly _workspaceRoot: string;
     private readonly _extensionUri: vscode.Uri;
-    private _refreshDebounceTimer: ReturnType<typeof setTimeout> | undefined;
 
     private constructor(panel: vscode.WebviewPanel, workspaceRoot: string, extensionUri: vscode.Uri, startPath: string) {
         this._panel = panel;
@@ -27,33 +29,10 @@ export class TreemapPanel {
         );
 
         this._panel.webview.html = this._getHtml();
-        void this._scanFullAndSend(startPath);
-
-        // Watch for file system changes and invalidate the cache.
-        const watcher = vscode.workspace.createFileSystemWatcher(
-            new vscode.RelativePattern(workspaceRoot, '**/*')
-        );
-        const onFsChange = () => {
-            // Immediately mark cache stale so any in-flight navigation
-            // that finishes later will re-scan rather than use old data.
-            this._fullTree = null;
-
-            // Debounce: only trigger a visible refresh after changes settle.
-            if (this._refreshDebounceTimer !== undefined) {
-                clearTimeout(this._refreshDebounceTimer);
-            }
-            this._refreshDebounceTimer = setTimeout(() => {
-                this._refreshDebounceTimer = undefined;
-                if (this._panel.visible) {
-                    void this._scanFullAndSend(this._currentPath);
-                }
-                // If not visible, cache is already null — next reveal will re-scan.
-            }, 1500);
-        };
-        watcher.onDidCreate(onFsChange, null, this._disposables);
-        watcher.onDidDelete(onFsChange, null, this._disposables);
-        watcher.onDidChange(onFsChange, null, this._disposables);
-        this._disposables.push(watcher);
+        void this._scanAndSend(startPath);
+        // NOTE: no FileSystemWatcher here. Watching `**/*` on a large tree
+        // (e.g. the user profile) fires constantly and triggered endless
+        // automatic re-scans. Refresh is now manual (toolbar button).
     }
 
     /**
@@ -90,7 +69,7 @@ export class TreemapPanel {
 
         if (TreemapPanel.currentPanel) {
             TreemapPanel.currentPanel._panel.reveal(vscode.ViewColumn.One);
-            void TreemapPanel.currentPanel._scanCurrentAndSend(targetPath);
+            TreemapPanel.currentPanel._sendLevel(targetPath);
             return;
         }
 
@@ -113,55 +92,92 @@ export class TreemapPanel {
         TreemapPanel.currentPanel = new TreemapPanel(panel, workspaceRoot, context.extensionUri, targetPath);
     }
 
-    /** First-time scan: scan both full workspace and send current-level view. */
-    private async _scanFullAndSend(rootPath: string): Promise<void> {
+    /**
+     * Scan a single folder and stream progress to the webview.
+     *
+     * Only the requested folder is scanned (NOT the whole workspace root),
+     * which is what previously made scanning a folder like C:\Users appear
+     * to hang. Results are pushed to the webview as they are computed.
+     */
+    private async _scanAndSend(rootPath: string): Promise<void> {
         this._currentPath = rootPath;
-        this._panel.webview.postMessage({ type: 'scanning', path: rootPath });
+        const token = ++this._scanToken;
+        this._panel.webview.postMessage({ type: 'start', path: rootPath });
 
-        // Scan the full workspace once, cache it. The async scanner yields to
-        // the event loop, so the 'scanning' message renders before results.
-        this._fullTree = await scanDirectory(this._workspaceRoot);
+        const result = await scanDirectory(rootPath, (p) => {
+            if (token !== this._scanToken) { return; }
+            this._panel.webview.postMessage({
+                type: 'progress',
+                fileCount: p.fileCount,
+                dirCount: p.dirCount,
+                totalBytes: p.totalBytes,
+                // Keep the displayed path stable at the folder being scanned;
+                // the transient per-directory position must not change the UI.
+                currentPath: rootPath,
+                topLevel: p.topLevel,
+                typeStats: p.typeStats,
+                largestFiles: p.largestFiles
+            });
+        }, (c) => {
+            // Called synchronously at scan start; remember the handle so the
+            // webview can pause/resume this scan.
+            if (token === this._scanToken) {
+                this._scanControl = c;
+            }
+        });
 
-        // For the current-level tree, find the subtree at currentPath.
-        const currentTree = this._findSubtree(this._fullTree, rootPath) || this._fullTree;
+        // A newer scan superseded this one; drop the stale result.
+        if (token !== this._scanToken) { return; }
+
+        this._scanControl = null;
+        this._scannedTree = result.root;
+        this._scanResult = result;
 
         this._panel.webview.postMessage({
-            type: 'treeData',
-            tree: this._serializeTree(currentTree),
-            fullTree: this._serializeTree(this._fullTree),
-            currentPath: rootPath
+            type: 'result',
+            currentPath: rootPath,
+            topLevel: topLevelEntries(result.root),
+            typeStats: result.typeStats,
+            largestFiles: result.largestFiles,
+            fileCount: result.fileCount,
+            dirCount: result.dirCount,
+            totalBytes: result.totalBytes
         });
     }
 
-    /** Drill-down: reuse the cached fullTree subtree; only re-scan if not cached. */
-    private async _scanCurrentAndSend(rootPath: string): Promise<void> {
-        this._currentPath = rootPath;
+    /**
+     * Show a directory's immediate children. Prefers the in-memory tree so
+     * drill-down is instant (no filesystem work); falls back to a fresh scan
+     * when the path is not part of the cached tree.
+     */
+    private _sendLevel(targetPath: string): void {
+        this._currentPath = targetPath;
 
-        if (!this._fullTree) {
-            this._panel.webview.postMessage({ type: 'scanning', path: rootPath });
-            this._fullTree = await scanDirectory(this._workspaceRoot);
+        const tree = this._scannedTree;
+        if (!tree) {
+            void this._scanAndSend(targetPath);
+            return;
         }
 
-        // Prefer the cached subtree — no filesystem work needed for drill-down.
-        let currentTree = this._findSubtree(this._fullTree, rootPath);
-        if (!currentTree) {
-            // Path outside the cached tree (rare): scan it directly.
-            this._panel.webview.postMessage({ type: 'scanning', path: rootPath });
-            currentTree = await scanDirectory(rootPath);
+        const node = this._findSubtree(tree, targetPath);
+        if (!node) {
+            // Path outside the scanned tree (e.g. `goUp` above the root).
+            void this._scanAndSend(targetPath);
+            return;
         }
 
         this._panel.webview.postMessage({
-            type: 'treeData',
-            tree: this._serializeTree(currentTree),
-            fullTree: this._serializeTree(this._fullTree),
-            currentPath: rootPath
+            type: 'level',
+            currentPath: targetPath,
+            topLevel: topLevelEntries(node)
         });
     }
 
-    /** Find the node at targetPath within the tree. */
+    /** Find the directory node at targetPath within the tree. */
     private _findSubtree(node: FileNode, targetPath: string): FileNode | null {
-        const normalized = path.normalize(targetPath);
-        if (path.normalize(node.path) === normalized) { return node; }
+        if (node.isDirectory && node.path && path.normalize(node.path) === path.normalize(targetPath)) {
+            return node;
+        }
         if (node.children) {
             for (const child of node.children) {
                 const found = this._findSubtree(child, targetPath);
@@ -171,24 +187,11 @@ export class TreemapPanel {
         return null;
     }
 
-    private _serializeTree(node: FileNode): any {
-        const obj: any = {
-            name: node.name,
-            path: node.path,
-            size: node.size,
-            isDirectory: node.isDirectory
-        };
-        if (node.children && node.children.length > 0) {
-            obj.children = node.children.map(c => this._serializeTree(c));
-        }
-        return obj;
-    }
-
     private _handleMessage(msg: { command: string; path?: string }): void {
         switch (msg.command) {
             case 'drillDown':
                 if (msg.path) {
-                    void this._scanCurrentAndSend(msg.path);
+                    this._sendLevel(msg.path);
                 }
                 break;
             case 'revealInExplorer':
@@ -205,8 +208,24 @@ export class TreemapPanel {
                 if (this._currentPath) {
                     const parent = path.dirname(this._currentPath);
                     if (parent !== this._currentPath) {
-                        void this._scanCurrentAndSend(parent);
+                        this._sendLevel(parent);
                     }
+                }
+                break;
+            case 'rescan':
+                // Manual refresh: re-scan the folder currently being shown.
+                void this._scanAndSend(this._currentPath);
+                break;
+            case 'pause':
+                if (this._scanControl) {
+                    this._scanControl.pause();
+                    this._panel.webview.postMessage({ type: 'pauseState', paused: true });
+                }
+                break;
+            case 'resume':
+                if (this._scanControl) {
+                    this._scanControl.resume();
+                    this._panel.webview.postMessage({ type: 'pauseState', paused: false });
                 }
                 break;
         }
@@ -248,6 +267,8 @@ export class TreemapPanel {
             <button class="tab" data-view="largest"><i class="codicon codicon-graph"></i> Largest Files</button>
         </div>
         <div class="toolbar-options">
+            <button id="pause-btn" title="Pause or resume scanning" disabled><i class="codicon codicon-debug-pause"></i> Pause</button>
+            <button id="refresh-btn" title="Rescan the current folder"><i class="codicon codicon-refresh"></i> Refresh</button>
             <label id="largest-controls" class="hidden">
                 <select id="type-filter">
                     <option value="">All Types</option>
@@ -258,6 +279,7 @@ export class TreemapPanel {
             </label>
         </div>
     </div>
+    <div id="status"></div>
     <div id="breadcrumb"></div>
     <div id="treemap"></div>
     <div id="table-view" class="hidden"></div>
@@ -270,9 +292,6 @@ export class TreemapPanel {
 
     public dispose(): void {
         TreemapPanel.currentPanel = undefined;
-        if (this._refreshDebounceTimer !== undefined) {
-            clearTimeout(this._refreshDebounceTimer);
-        }
         this._panel.dispose();
         while (this._disposables.length) {
             const d = this._disposables.pop();

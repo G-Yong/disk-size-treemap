@@ -26,18 +26,28 @@ body {
     gap: 12px;
 }
 .view-tabs { display: flex; gap: 2px; }
-.tab {
+.tab,
+#refresh-btn,
+#pause-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
     padding: 4px 12px;
     border: none;
     border-radius: 4px;
     cursor: pointer;
     font-size: 12px;
+    line-height: 1;
     background: transparent;
     color: var(--vscode-foreground, #cccccc);
     transition: background 0.15s;
 }
-.tab:hover { background: var(--vscode-list-hoverBackground, #2a2d2e); }
+.tab:hover,
+#refresh-btn:hover,
+#pause-btn:hover { background: var(--vscode-list-hoverBackground, #2a2d2e); }
 .tab.active { background: var(--vscode-button-background, #0e639c); color: #fff; }
+#pause-btn:disabled { opacity: 0.45; cursor: default; }
+#pause-btn:disabled:hover { background: transparent; }
 .toolbar-options { display: flex; align-items: center; gap: 6px; font-size: 12px; }
 #topn-input { width: 60px; padding: 2px 4px; font-size: 12px;
     background: var(--vscode-input-background, #3c3c3c);
@@ -80,6 +90,11 @@ body {
 #table-view .col-path { }
 #table-view tr[data-path] { cursor: pointer; }
 #table-view tr:hover { background: var(--vscode-list-hoverBackground, #2a2d2e); }
+#table-view .table-empty {
+    padding: 16px;
+    color: var(--vscode-descriptionForeground, #717171);
+    font-size: 12px;
+}
 #table-view .type-dot {
     display: inline-block; width: 8px; height: 8px; border-radius: 50%;
     margin-right: 4px; vertical-align: middle;
@@ -151,6 +166,30 @@ body {
     color: var(--vscode-descriptionForeground, #717171);
 }
 
+/* ---- Status line (scan progress / totals) ---- */
+#status {
+    padding: 4px 12px;
+    font-size: 12px;
+    color: var(--vscode-descriptionForeground, #717171);
+    border-bottom: 1px solid var(--vscode-panel-border, #3c3c3c);
+    flex-shrink: 0;
+    background: var(--vscode-sideBar-background, #252526);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+/* ---- In-treemap note (e.g. "showing top N of M items") ---- */
+#note {
+    position: absolute;
+    bottom: 8px;
+    left: 12px;
+    font-size: 11px;
+    color: var(--vscode-descriptionForeground, #717171);
+    pointer-events: none;
+    z-index: 50;
+}
+
 .tooltip {
     position: absolute;
     padding: 6px 10px;
@@ -183,10 +222,12 @@ body {
     font-size: 12px;
 }
 
-/* Tab buttons: codicon inside <i> */
-.tab .codicon {
-    vertical-align: middle;
-    margin-right: 2px;
+/* Toolbar buttons: codicon inside <i> (flex alignment handles centering) */
+.tab .codicon,
+#refresh-btn .codicon,
+#pause-btn .codicon {
+    display: inline-block;
+    line-height: 1;
     font-size: 13px;
 }
 

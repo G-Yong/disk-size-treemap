@@ -184,20 +184,32 @@ function formatSize(bytes) {
 }
 
 var vscode = acquireVsCodeApi();
+
+// Cap on how many cells the structure view draws at once; rendering tens of
+// thousands of SVG rects freezes the webview.
+var MAX_RENDER_CELLS = 2000;
+
 var currentPath = '';
-var currentTree = null;       // full serialized tree with nested children
-var fullTree = null;          // always the full workspace tree (for types/largest views)
+var currentTopLevel = [];  // flat immediate children for the structure view
+var typeStats = [];        // [{ ext, size, count }] for the scanned root
+var largestFiles = [];     // [{ path, name, ext, size }] sorted desc
+var totals = { fileCount: 0, dirCount: 0, totalBytes: 0 };
 var activeView = 'structure'; // 'structure' | 'types' | 'largest'
 var topN = 50;                // top-N count for largest files view
 var selectedType = '';        // file extension filter for largest view ('' = all)
+var isScanning = false;
+var isPaused = false;
+var lastTypeFilterKey = '';   // avoid rebuilding the type dropdown on every tick
 
 var treemapDiv = document.getElementById('treemap');
 var tableView = document.getElementById('table-view');
 var breadcrumb = document.getElementById('breadcrumb');
 var tooltip = document.getElementById('tooltip');
+var statusEl = document.getElementById('status');
 var largestControls = document.getElementById('largest-controls');
 var topnInput = document.getElementById('topn-input');
 var typeFilter = document.getElementById('type-filter');
+var pauseBtn = document.getElementById('pause-btn');
 var tabs = document.querySelectorAll('.tab');
 
 // ---- Render treemap (shared helper) ----
@@ -313,47 +325,45 @@ function renderTreemapSVG(dataArray, containerEl, getColorFn, onClickFn, onDblCl
         });
 }
 
-// ---- Collect all files from nested tree ----
-
-function collectAllFiles(node) {
-    var files = [];
-    if (!node) { return files; }
-    if (!node.isDirectory) {
-        files.push(node);
+function showNote(text) {
+    var existing = document.getElementById('note');
+    if (existing) { existing.parentNode.removeChild(existing); }
+    if (text) {
+        var note = document.createElement('div');
+        note.id = 'note';
+        note.textContent = text;
+        treemapDiv.appendChild(note);
     }
-    if (node.children) {
-        for (var i = 0; i < node.children.length; i++) {
-            files = files.concat(collectAllFiles(node.children[i]));
-        }
-    }
-    return files;
 }
 
-// ---- View: File Structure (existing behavior) ----
+// ---- View: File Structure ----
 
-function renderStructure(tree, dirPath) {
-    currentPath = dirPath;
-    renderBreadcrumb(dirPath);
+function renderStructure(topLevel) {
+    renderBreadcrumb(currentPath);
     treemapDiv.classList.remove('hidden');
     tableView.classList.add('hidden');
 
-    treemapDiv.innerHTML = '';
-    if (!tree || !tree.children || tree.children.length === 0) {
-        treemapDiv.innerHTML = '<div id="loading">This folder is empty</div>';
+    var items = (topLevel || []).filter(function(c) { return c.size > 0; });
+    if (items.length === 0) {
+        treemapDiv.innerHTML = '';
+        showNote('');
+        if (isScanning) {
+            treemapDiv.innerHTML = '<div id="loading">Scanning\u2026 ' +
+                totals.fileCount.toLocaleString() + ' files so far</div>';
+        } else {
+            treemapDiv.innerHTML = '<div id="loading">This folder is empty</div>';
+        }
         return;
     }
 
-    var children = tree.children.filter(function(c) { return c.size > 0; });
-    if (children.length === 0) {
-        treemapDiv.innerHTML = '<div id="loading">No files with size in this folder</div>';
-        return;
+    var note = '';
+    if (items.length > MAX_RENDER_CELLS) {
+        note = 'Showing the top ' + MAX_RENDER_CELLS.toLocaleString() +
+            ' of ' + items.length.toLocaleString() + ' items';
+        items = items.slice(0, MAX_RENDER_CELLS);
     }
 
-    var flatChildren = children.map(function(c) {
-        return { name: c.name, path: c.path, size: c.size, isDirectory: c.isDirectory };
-    });
-
-    renderTreemapSVG(flatChildren, treemapDiv, null,
+    renderTreemapSVG(items, treemapDiv, null,
         function(d) {  // click: drill down for directories, reveal for files
             if (d.isDirectory) {
                 vscode.postMessage({ command: 'drillDown', path: d.path });
@@ -367,71 +377,68 @@ function renderStructure(tree, dirPath) {
             }
         }
     );
+    showNote(note);
 }
 
 // ---- View: File Types ----
 
-function renderFileTypes(tree, dirPath) {
-    currentPath = dirPath;
-    renderBreadcrumb(dirPath);
+function renderFileTypes(stats) {
+    renderBreadcrumb(currentPath);
     treemapDiv.classList.remove('hidden');
     tableView.classList.add('hidden');
 
-    var allFiles = collectAllFiles(tree);
-    var typeMap = {};
-    for (var i = 0; i < allFiles.length; i++) {
-        var f = allFiles[i];
-        var ext = f.name.includes('.') ? f.name.split('.').pop().toLowerCase() : '(no extension)';
-        if (!typeMap[ext]) {
-            typeMap[ext] = { name: ext, size: 0, count: 0, samplePath: f.path };
-        }
-        typeMap[ext].size += f.size;
-        typeMap[ext].count += 1;
+    var arr = [];
+    for (var i = 0; i < (stats || []).length; i++) {
+        var s = stats[i];
+        arr.push({
+            name: s.ext + ' (' + s.count.toLocaleString() + ' files)',
+            size: s.size,
+            isDirectory: false,
+            ext: s.ext
+        });
     }
 
-    var typeArray = [];
-    for (var key in typeMap) {
-        if (typeMap.hasOwnProperty(key)) {
-            typeMap[key].name = key + ' (' + typeMap[key].count + ' files)';
-            typeMap[key].isDirectory = false;
-            typeMap[key].ext = key;
-            typeArray.push(typeMap[key]);
-        }
+    if (arr.length === 0) {
+        treemapDiv.innerHTML = '';
+        showNote('');
+        treemapDiv.innerHTML = isScanning
+            ? '<div id="loading">Scanning\u2026</div>'
+            : '<div id="loading">No files to display</div>';
+        return;
     }
 
-    renderTreemapSVG(typeArray, treemapDiv,
+    renderTreemapSVG(arr, treemapDiv,
         function(d) { return EXT_COLORS[d.ext] || OTHER_COLOR; },
         function(d) {  // click: jump to Largest Files filtered by this type
             selectedType = d.ext;
             switchView('largest');
-        },
-        function(d) { vscode.postMessage({ command: 'revealInExplorer', path: d.samplePath }); }
+        }
     );
+    showNote('');
 }
 
 // ---- View: Largest Files Table ----
 
-function renderLargestFiles(tree, dirPath, n) {
-    currentPath = dirPath;
-    renderBreadcrumb(dirPath);
+function renderLargestFiles(files, n) {
+    renderBreadcrumb(currentPath);
     treemapDiv.classList.add('hidden');
     tableView.classList.remove('hidden');
 
-    populateTypeFilter(tree);
+    populateTypeFilter(typeStats);
 
-    var allFiles = collectAllFiles(tree);
-
-    // Filter by selected type
+    var all = (files || []).slice();
     if (selectedType) {
-        allFiles = allFiles.filter(function(f) {
-            var ext = f.name.includes('.') ? f.name.split('.').pop().toLowerCase() : '(no extension)';
-            return ext === selectedType;
-        });
+        all = all.filter(function(f) { return f.ext === selectedType; });
+    }
+    all.sort(function(a, b) { return b.size - a.size; });
+
+    if (all.length === 0) {
+        tableView.innerHTML = '<div class="table-empty">' +
+            (isScanning ? 'Scanning\u2026' : 'No files to display') + '</div>';
+        return;
     }
 
-    allFiles.sort(function(a, b) { return b.size - a.size; });
-
-    var limit = Math.min(n, allFiles.length);
+    var limit = Math.min(n, all.length);
 
     var html = '<table><thead><tr>' +
         '<th class="col-rank">#</th>' +
@@ -440,13 +447,11 @@ function renderLargestFiles(tree, dirPath, n) {
         '</tr></thead><tbody>';
 
     for (var i = 0; i < limit; i++) {
-        var f = allFiles[i];
-        var ext = f.name.includes('.') ? f.name.split('.').pop().toLowerCase() : '';
-        var color = EXT_COLORS[ext] || OTHER_COLOR;
+        var f = all[i];
         html += '<tr data-path="' + f.path.replace(/"/g, '&quot;') + '">' +
             '<td class="col-rank">' + (i + 1) + '</td>' +
             '<td class="col-path">' +
-                '<span class="codicon-icon">' + getNodeIcon(f) + '</span>' +
+                '<span class="codicon-icon">' + getNodeIcon({ name: f.name, isDirectory: false }) + '</span>' +
                 '<span class="path-cell">' + f.path + '</span>' +
             '</td>' +
             '<td class="col-size">' + formatSize(f.size) + '</td>' +
@@ -469,6 +474,35 @@ function renderLargestFiles(tree, dirPath, n) {
     });
 }
 
+// ---- Status line ----
+
+function renderStatus() {
+    if (isScanning) {
+        if (isPaused) {
+            statusEl.textContent = 'Paused: ' + currentPath + ' \u2014 ' +
+                totals.fileCount.toLocaleString() + ' files \u00b7 ' +
+                formatSize(totals.totalBytes);
+        } else {
+            statusEl.textContent = 'Scanning: ' + currentPath + ' \u2014 ' +
+                totals.fileCount.toLocaleString() + ' files \u00b7 ' +
+                formatSize(totals.totalBytes);
+        }
+    } else {
+        statusEl.textContent = formatSize(totals.totalBytes) + ' \u00b7 ' +
+            totals.fileCount.toLocaleString() + ' files \u00b7 ' +
+            totals.dirCount.toLocaleString() + ' folders';
+    }
+}
+
+function updatePauseButton() {
+    pauseBtn.disabled = !isScanning;
+    if (isPaused) {
+        pauseBtn.innerHTML = '<i class="codicon codicon-play"></i> Resume';
+    } else {
+        pauseBtn.innerHTML = '<i class="codicon codicon-debug-pause"></i> Pause';
+    }
+}
+
 // ---- View switching ----
 
 function switchView(view) {
@@ -477,25 +511,19 @@ function switchView(view) {
         t.classList.toggle('active', t.getAttribute('data-view') === view);
     });
     largestControls.classList.toggle('hidden', view !== 'largest');
-
-    if (currentTree) {
-        refreshView();
-    }
+    refreshView();
 }
 
 function refreshView() {
-    if (!currentTree) { return; }
-    var tree = currentTree;
-    var path = currentPath;
     switch (activeView) {
         case 'structure':
-            renderStructure(tree, path);
+            renderStructure(currentTopLevel);
             break;
         case 'types':
-            renderFileTypes(fullTree || tree, path);
+            renderFileTypes(typeStats);
             break;
         case 'largest':
-            renderLargestFiles(fullTree || tree, path, topN);
+            renderLargestFiles(largestFiles, topN);
             break;
     }
 }
@@ -519,25 +547,25 @@ typeFilter.addEventListener('change', function() {
     refreshView();
 });
 
-// Populate the type filter dropdown from fullTree data
-function populateTypeFilter(tree) {
-    if (!tree) { return; }
-    var allFiles = collectAllFiles(tree);
-    var seen = {};
-    var types = [];
-    for (var i = 0; i < allFiles.length; i++) {
-        var f = allFiles[i];
-        var ext = f.name.includes('.') ? f.name.split('.').pop().toLowerCase() : '(no extension)';
-        if (!seen[ext]) {
-            seen[ext] = true;
-            types.push(ext);
-        }
-    }
-    types.sort();
+document.getElementById('refresh-btn').addEventListener('click', function() {
+    vscode.postMessage({ command: 'rescan' });
+});
+
+pauseBtn.addEventListener('click', function() {
+    vscode.postMessage({ command: isPaused ? 'resume' : 'pause' });
+});
+
+// Populate the type filter dropdown from typeStats (only when the list changes)
+function populateTypeFilter(stats) {
+    var types = (stats || []).map(function(s) { return s.ext; }).sort();
+    var key = types.join('\u0000');
+    if (key === lastTypeFilterKey) { return; }
+    lastTypeFilterKey = key;
+
     var html = '<option value="">All Types</option>';
-    for (var j = 0; j < types.length; j++) {
-        var sel = types[j] === selectedType ? ' selected' : '';
-        html += '<option value="' + types[j] + '"' + sel + '>' + types[j] + '</option>';
+    for (var i = 0; i < types.length; i++) {
+        var sel = types[i] === selectedType ? ' selected' : '';
+        html += '<option value="' + types[i] + '"' + sel + '>' + types[i] + '</option>';
     }
     typeFilter.innerHTML = html;
 }
@@ -575,14 +603,60 @@ function renderBreadcrumb(dirPath) {
 window.addEventListener('message', function(event) {
     var msg = event.data;
     switch (msg.type) {
-        case 'scanning':
-            treemapDiv.innerHTML = '<div id="loading">Scanning: ' + msg.path + '\u2026</div>';
-            break;
-        case 'treeData':
-            currentTree = msg.tree;
-            fullTree = msg.fullTree || msg.tree;
-            currentPath = msg.currentPath;
+        case 'start':
+            isScanning = true;
+            isPaused = false;
+            currentPath = msg.path;
+            currentTopLevel = [];
+            totals = { fileCount: 0, dirCount: 0, totalBytes: 0 };
+            renderBreadcrumb(msg.path);
+            renderStatus();
+            updatePauseButton();
             refreshView();
+            break;
+        case 'progress':
+            isScanning = true;
+            currentPath = msg.currentPath;
+            currentTopLevel = msg.topLevel || [];
+            typeStats = msg.typeStats || [];
+            largestFiles = msg.largestFiles || [];
+            totals = {
+                fileCount: msg.fileCount,
+                dirCount: msg.dirCount,
+                totalBytes: msg.totalBytes
+            };
+            renderStatus();
+            refreshView();
+            break;
+        case 'result':
+            isScanning = false;
+            isPaused = false;
+            currentPath = msg.currentPath;
+            currentTopLevel = msg.topLevel || [];
+            typeStats = msg.typeStats || [];
+            largestFiles = msg.largestFiles || [];
+            totals = {
+                fileCount: msg.fileCount,
+                dirCount: msg.dirCount,
+                totalBytes: msg.totalBytes
+            };
+            renderStatus();
+            updatePauseButton();
+            refreshView();
+            break;
+        case 'level':
+            isScanning = false;
+            isPaused = false;
+            currentPath = msg.currentPath;
+            currentTopLevel = msg.topLevel || [];
+            renderStatus();
+            updatePauseButton();
+            refreshView();
+            break;
+        case 'pauseState':
+            isPaused = !!msg.paused;
+            renderStatus();
+            updatePauseButton();
             break;
     }
 });
