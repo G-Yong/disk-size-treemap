@@ -2,7 +2,7 @@
   "name": "disk-size-treemap",
   "displayName": "Disk Size Treemap",
   "description": "Visualize workspace file and folder sizes as an interactive squarified treemap",
-  "version": "0.0.7",
+  "version": "0.0.8",
   "publisher": "G-Yong",
   "icon": "image/icon.png",
   "repository": {
