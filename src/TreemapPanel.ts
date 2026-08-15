@@ -1,7 +1,10 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs';
+import * as fsp from 'fs/promises';
 import { scanDirectory, FileNode, ScanResult, ScanControl, topLevelEntries } from './FileScanner';
+
+const TOP_LEVEL_DISPLAY_LIMIT = 2000;
 
 export class TreemapPanel {
     public static currentPanel: TreemapPanel | undefined;
@@ -41,13 +44,13 @@ export class TreemapPanel {
      * - Folder: show that folder
      * - No URI: show workspace root
      */
-    private static _resolveTargetPath(uri: vscode.Uri | undefined, workspaceRoot: string): string {
+    private static async _resolveTargetPath(uri: vscode.Uri | undefined, workspaceRoot: string): Promise<string> {
         if (!uri) {
             return workspaceRoot;
         }
         const fsPath = uri.fsPath;
         try {
-            const stats = fs.statSync(fsPath);
+            const stats = await fsp.stat(fsPath);
             if (stats.isFile()) {
                 return path.dirname(fsPath);
             }
@@ -58,14 +61,14 @@ export class TreemapPanel {
         }
     }
 
-    public static createOrShow(context: vscode.ExtensionContext, uri?: vscode.Uri): void {
+    public static async createOrShow(context: vscode.ExtensionContext, uri?: vscode.Uri): Promise<void> {
         const workspaceFolders = vscode.workspace.workspaceFolders;
         if (!workspaceFolders || workspaceFolders.length === 0) {
             vscode.window.showErrorMessage('No workspace folder is open.');
             return;
         }
         const workspaceRoot = workspaceFolders[0].uri.fsPath;
-        const targetPath = TreemapPanel._resolveTargetPath(uri, workspaceRoot);
+        const targetPath = await TreemapPanel._resolveTargetPath(uri, workspaceRoot);
 
         if (TreemapPanel.currentPanel) {
             TreemapPanel.currentPanel._panel.reveal(vscode.ViewColumn.One);
@@ -101,6 +104,10 @@ export class TreemapPanel {
      */
     private async _scanAndSend(rootPath: string): Promise<void> {
         this._currentPath = rootPath;
+        if (this._scanControl) {
+            this._scanControl.cancel();
+            this._scanControl = null;
+        }
         const token = ++this._scanToken;
         this._panel.webview.postMessage({ type: 'start', path: rootPath });
 
@@ -115,6 +122,7 @@ export class TreemapPanel {
                 // the transient per-directory position must not change the UI.
                 currentPath: rootPath,
                 topLevel: p.topLevel,
+                  totalChildren: p.totalChildren,
                 typeStats: p.typeStats,
                 largestFiles: p.largestFiles
             });
@@ -136,7 +144,8 @@ export class TreemapPanel {
         this._panel.webview.postMessage({
             type: 'result',
             currentPath: rootPath,
-            topLevel: topLevelEntries(result.root),
+            topLevel: topLevelEntries(result.root, TOP_LEVEL_DISPLAY_LIMIT),
+              totalChildren: result.root.children ? result.root.children.length : 0,
             typeStats: result.typeStats,
             largestFiles: result.largestFiles,
             fileCount: result.fileCount,
@@ -169,22 +178,36 @@ export class TreemapPanel {
         this._panel.webview.postMessage({
             type: 'level',
             currentPath: targetPath,
-            topLevel: topLevelEntries(node)
+            topLevel: topLevelEntries(node, TOP_LEVEL_DISPLAY_LIMIT),
+              totalChildren: node.children ? node.children.length : 0
         });
     }
 
-    /** Find the directory node at targetPath within the tree. */
-    private _findSubtree(node: FileNode, targetPath: string): FileNode | null {
-        if (node.isDirectory && node.path && path.normalize(node.path) === path.normalize(targetPath)) {
-            return node;
-        }
-        if (node.children) {
-            for (const child of node.children) {
-                const found = this._findSubtree(child, targetPath);
-                if (found) { return found; }
+    /** Find the directory node at targetPath within the tree by walking the
+     *  relative path down from `root` instead of DFS-ing the whole tree. */
+    private _findSubtree(root: FileNode, targetPath: string): FileNode | null {
+        const rootPath = root.path ? path.normalize(root.path) : '';
+        const target = path.normalize(targetPath);
+        if (!rootPath) { return null; }
+        const rel = path.relative(rootPath, target);
+        if (rel === '') { return root; }
+        if (!rel || rel.startsWith('..') || path.isAbsolute(rel)) { return null; }
+
+        let cur: FileNode = root;
+        const segments = rel.split(path.sep);
+        for (const seg of segments) {
+            const children = cur.children || [];
+            let next: FileNode | undefined;
+            for (let i = 0; i < children.length; i++) {
+                if (children[i].name === seg) {
+                    next = children[i];
+                    break;
+                }
             }
+            if (!next) { return null; }
+            cur = next;
         }
-        return null;
+        return cur;
     }
 
     private _handleMessage(msg: { command: string; path?: string }): void {
@@ -292,6 +315,10 @@ export class TreemapPanel {
 
     public dispose(): void {
         TreemapPanel.currentPanel = undefined;
+        if (this._scanControl) {
+            this._scanControl.cancel();
+            this._scanControl = null;
+        }
         this._panel.dispose();
         while (this._disposables.length) {
             const d = this._disposables.pop();

@@ -1,5 +1,4 @@
 import * as fsp from 'fs/promises';
-import type { Dirent } from 'fs';
 import * as path from 'path';
 
 /**
@@ -55,6 +54,8 @@ export interface ScanProgress {
     currentPath: string;
     /** Live snapshot of the root's immediate children, sorted by size desc. */
     topLevel: TopLevelEntry[];
+    /** Total immediate children of the root (may exceed `topLevel.length`). */
+    totalChildren: number;
     /** Live snapshot of per-extension totals, sorted by size desc (capped). */
     typeStats: TypeStat[];
     /** Live snapshot of the current top-N largest files. */
@@ -76,8 +77,10 @@ export interface ScanResult {
  */
 export interface ScanControl {
     paused: boolean;
+    cancelled: boolean;
     pause(): void;
     resume(): void;
+    cancel(): void;
 }
 
 const MAX_CONCURRENCY = 64;
@@ -87,28 +90,33 @@ const TOP_LEVEL_SNAPSHOT_LIMIT = 200;
 const PROGRESS_TYPES_LIMIT = 500;
 
 /**
- * Minimal min-heap (ordered by `size`) used to keep only the N largest files
- * without allocating an array of every file in the tree.
+ * Minimal min-heap ordered by `compare` (defaults to numeric `size`) used to
+ * keep only the N largest items without allocating an array of every item.
  */
-class MinHeap {
-    private readonly a: LargestFile[] = [];
+class MinHeap<T> {
+    private readonly a: T[] = [];
+    private readonly cmp: (x: T, y: T) => number;
+
+    constructor(cmp?: (x: T, y: T) => number) {
+        this.cmp = cmp || ((x: any, y: any) => x.size - y.size);
+    }
 
     size(): number { return this.a.length; }
-    peek(): LargestFile { return this.a[0]; }
+    peek(): T { return this.a[0]; }
 
-    push(x: LargestFile): void {
+    push(x: T): void {
         const a = this.a;
         a.push(x);
         let i = a.length - 1;
         while (i > 0) {
             const p = (i - 1) >> 1;
-            if (a[p].size <= a[i].size) { break; }
+            if (this.cmp(a[p], a[i]) <= 0) { break; }
             const t = a[p]; a[p] = a[i]; a[i] = t;
             i = p;
         }
     }
 
-    replaceRoot(x: LargestFile): void {
+    replaceRoot(x: T): void {
         const a = this.a;
         a[0] = x;
         let i = 0;
@@ -117,16 +125,16 @@ class MinHeap {
             const l = i * 2 + 1;
             const r = i * 2 + 2;
             let smallest = i;
-            if (l < n && a[l].size < a[smallest].size) { smallest = l; }
-            if (r < n && a[r].size < a[smallest].size) { smallest = r; }
+            if (l < n && this.cmp(a[l], a[smallest]) < 0) { smallest = l; }
+            if (r < n && this.cmp(a[r], a[smallest]) < 0) { smallest = r; }
             if (smallest === i) { break; }
             const t = a[i]; a[i] = a[smallest]; a[smallest] = t;
             i = smallest;
         }
     }
 
-    toSortedDesc(): LargestFile[] {
-        return this.a.slice().sort((x, y) => y.size - x.size);
+    toSortedDesc(): T[] {
+        return this.a.slice().sort((x, y) => this.cmp(y, x));
     }
 }
 
@@ -138,10 +146,32 @@ export function nodePath(node: FileNode): string {
     return node.name;
 }
 
-/** Flat, sorted list of a directory's immediate children for the UI. */
+/** Flat, sorted list of a directory's immediate children for the UI.
+ *  When `limit` is supplied, only the top `limit` entries are kept, using a
+ *  bounded heap rather than a full sort (important for huge directories). */
 export function topLevelEntries(node: FileNode, limit?: number): TopLevelEntry[] {
-    const out: TopLevelEntry[] = [];
     const children = node.children || [];
+    if (typeof limit === 'number') {
+        if (limit <= 0) { return []; }
+        const heap = new MinHeap<TopLevelEntry>((x, y) => x.size - y.size);
+        for (let i = 0; i < children.length; i++) {
+            const c = children[i];
+            const entry: TopLevelEntry = {
+                name: c.name,
+                path: nodePath(c),
+                size: c.size,
+                isDirectory: c.isDirectory
+            };
+            if (heap.size() < limit) {
+                heap.push(entry);
+            } else if (entry.size > heap.peek().size) {
+                heap.replaceRoot(entry);
+            }
+        }
+        return heap.toSortedDesc();
+    }
+
+    const out: TopLevelEntry[] = [];
     for (let i = 0; i < children.length; i++) {
         const c = children[i];
         out.push({
@@ -152,7 +182,7 @@ export function topLevelEntries(node: FileNode, limit?: number): TopLevelEntry[]
         });
     }
     out.sort((a, b) => b.size - a.size);
-    return typeof limit === 'number' ? out.slice(0, limit) : out;
+    return out;
 }
 
 function extOf(name: string): string {
@@ -165,41 +195,51 @@ export async function scanDirectory(
     onProgress?: (p: ScanProgress) => void,
     onControl?: (c: ScanControl) => void
 ): Promise<ScanResult> {
-    // Pause-aware, bounded-concurrency scheduler (see original notes re: EMFILE).
-    // Set up first so the caller receives the control handle synchronously.
-    let active = 0;
-    const queue: Array<() => void> = [];
+    // Bounded-concurrency worker pool (see original notes re: EMFILE).
+    // The queue uses an explicit head index so enqueue/dequeue are O(1) even
+    // when a directory has hundreds of thousands of direct children.
+    let workers = 0;
+    let pending = 0;
+    let finished = false;
+    let scanStarted = false;
+    let queueHead = 0;
+    const queue: FileNode[] = [];
+    let root!: FileNode;
+    let resolveDone!: (r: ScanResult) => void;
+
+    const done = new Promise<ScanResult>(resolve => { resolveDone = resolve; });
+
     const control: ScanControl = {
         paused: false,
+        cancelled: false,
         pause() { control.paused = true; },
-        resume() { control.paused = false; pump(); }
+        resume() { control.paused = false; pump(); },
+        cancel() {
+            if (control.cancelled) { return; }
+            control.cancelled = true;
+            // Queued nodes are already counted in `pending`; drop them so the
+            // returned promise can resolve once in-flight work settles.
+            pending -= queue.length - queueHead;
+            queue.length = 0;
+            queueHead = 0;
+            if (scanStarted) { finishIfDone(); }
+        }
     };
 
     function pump(): void {
-        while (!control.paused && active < MAX_CONCURRENCY && queue.length > 0) {
-            const resolve = queue.shift()!;
-            active++;
-            resolve();
+        while (!control.paused && !control.cancelled && workers < MAX_CONCURRENCY && queueHead < queue.length) {
+            workers++;
+            void worker();
         }
-    }
-
-    function acquire(): Promise<void> {
-        return new Promise<void>(resolve => {
-            queue.push(resolve);
-            pump();
-        });
-    }
-
-    function release(): void {
-        active--;
-        pump();
     }
 
     if (onControl) { onControl(control); }
 
     let isDir = false;
+    let rootStat!: Awaited<ReturnType<typeof fsp.stat>>;
     try {
-        isDir = (await fsp.stat(rootPath)).isDirectory();
+        rootStat = await fsp.stat(rootPath);
+        isDir = rootStat.isDirectory();
     } catch {
         return {
             root: { name: path.basename(rootPath), path: rootPath, size: 0, isDirectory: false },
@@ -213,8 +253,7 @@ export async function scanDirectory(
 
     // A single file (rare — the UI normally resolves to a directory).
     if (!isDir) {
-        let size = 0;
-        try { size = (await fsp.stat(rootPath)).size; } catch { /* size stays 0 */ }
+        const size = rootStat.size;
         const name = path.basename(rootPath);
         const ext = extOf(name);
         const file: LargestFile = { path: rootPath, name, ext, size };
@@ -228,7 +267,7 @@ export async function scanDirectory(
         };
     }
 
-    const root: FileNode = {
+    root = {
         name: path.basename(rootPath) || rootPath,
         path: rootPath,
         size: 0,
@@ -239,23 +278,33 @@ export async function scanDirectory(
     let fileCount = 0;
     let dirCount = 1; // the root itself
     let totalBytes = 0;
-    let pending = 0;
-    let finished = false;
     let currentPath = rootPath;
     let lastEmit = 0;
 
     const typeMap = new Map<string, { size: number; count: number }>();
-    const heap = new MinHeap();
+    const heap = new MinHeap<LargestFile>((x, y) => x.size - y.size);
 
     function snapshotTopLevel(): TopLevelEntry[] {
         return topLevelEntries(root, TOP_LEVEL_SNAPSHOT_LIMIT);
     }
 
     function snapshotTypeStats(limit?: number): TypeStat[] {
+        if (typeof limit === 'number') {
+            const typeHeap = new MinHeap<TypeStat>((x, y) => x.size - y.size);
+            typeMap.forEach((v, ext) => {
+                const item: TypeStat = { ext, size: v.size, count: v.count };
+                if (typeHeap.size() < limit) {
+                    typeHeap.push(item);
+                } else if (item.size > typeHeap.peek().size) {
+                    typeHeap.replaceRoot(item);
+                }
+            });
+            return typeHeap.toSortedDesc();
+        }
         const arr: TypeStat[] = [];
         typeMap.forEach((v, ext) => arr.push({ ext, size: v.size, count: v.count }));
         arr.sort((a, b) => b.size - a.size);
-        return typeof limit === 'number' ? arr.slice(0, limit) : arr;
+        return arr;
     }
 
     function emitProgress(): void {
@@ -266,6 +315,7 @@ export async function scanDirectory(
             totalBytes,
             currentPath,
             topLevel: snapshotTopLevel(),
+            totalChildren: root.children ? root.children.length : 0,
             typeStats: snapshotTypeStats(PROGRESS_TYPES_LIMIT),
             largestFiles: heap.toSortedDesc()
         });
@@ -305,9 +355,7 @@ export async function scanDirectory(
         }
     }
 
-    function settle(): void {
-        pending--;
-        maybeEmit();
+    function finishIfDone(): void {
         if (pending === 0 && !finished) {
             finished = true;
             emitProgress(); // final, complete snapshot
@@ -322,10 +370,38 @@ export async function scanDirectory(
         }
     }
 
-    let resolveDone!: (r: ScanResult) => void;
-    const done = new Promise<ScanResult>(resolve => { resolveDone = resolve; });
+    function settleNode(): void {
+        pending--;
+        maybeEmit();
+        finishIfDone();
+    }
 
-    async function scanNode(node: FileNode): Promise<void> {
+    function enqueue(node: FileNode): void {
+        pending++;
+        queue.push(node);
+    }
+
+    function dequeue(): FileNode | undefined {
+        // Compact periodically so a long-running scan never retains millions
+        // of already-processed queue slots.
+        if (queueHead > 1024) {
+            queue.splice(0, queueHead);
+            queueHead = 0;
+        }
+        if (queueHead >= queue.length) {
+            queue.length = 0;
+            queueHead = 0;
+            return undefined;
+        }
+        return queue[queueHead++];
+    }
+
+    async function processNode(node: FileNode): Promise<void> {
+        if (control.cancelled) {
+            settleNode();
+            return;
+        }
+
         if (node.isDirectory && node.path) {
             currentPath = node.path;
         }
@@ -333,56 +409,84 @@ export async function scanDirectory(
         if (!node.isDirectory) {
             const fullPath = nodePath(node);
             let size = 0;
-            await acquire();
             try {
                 size = (await fsp.stat(fullPath)).size;
             } catch {
                 // Permission denied / broken link / deleted mid-scan — size 0.
-            } finally {
-                release();
+            }
+            if (control.cancelled) {
+                settleNode();
+                return;
             }
             node.size = size;
             recordFile(node, size);
-            settle();
+            settleNode();
             return;
         }
 
-        let entries: Dirent[];
-        await acquire();
-        try {
-            entries = await fsp.readdir(node.path!, { withFileTypes: true });
-        } catch {
-            release();
-            settle();
-            return; // permission denied, etc.
-        }
-        release();
-
         node.children = [];
-        for (let i = 0; i < entries.length; i++) {
-            const entry = entries[i];
-            const child: FileNode = {
-                name: entry.name,
-                size: 0,
-                isDirectory: entry.isDirectory(),
-                parent: node
-            };
-            if (child.isDirectory) {
-                child.path = path.join(node.path!, entry.name);
-                dirCount++;
+        try {
+            const dir = await fsp.opendir(node.path!, { bufferSize: 64 });
+            for await (const entry of dir) {
+                if (control.cancelled) { break; }
+                const child: FileNode = {
+                    name: entry.name,
+                    size: 0,
+                    isDirectory: entry.isDirectory(),
+                    parent: node
+                };
+                if (child.isDirectory) {
+                    child.path = path.join(node.path!, entry.name);
+                    dirCount++;
+                }
+                node.children.push(child);
+                enqueue(child);
+                if (((queue.length - queueHead) & 63) === 0) { pump(); }
             }
-            node.children.push(child);
-
-            pending++;
-            // Fire-and-forget; `settle()` (inside scanNode) decrements `pending`.
-            void scanNode(child);
+        } catch {
+            // Permission denied, broken link, etc. — leave an empty directory.
+            node.children = [];
         }
 
-        settle(); // this directory itself is done scheduling its children
+        if (control.cancelled) {
+            settleNode();
+            return;
+        }
+
+        settleNode();
+        pump();
     }
 
-    pending = 1;
-    void scanNode(root);
+    async function worker(): Promise<void> {
+        try {
+            while (!control.paused && !control.cancelled) {
+                const node = dequeue();
+                if (!node) { break; }
+                await processNode(node);
+            }
+        } finally {
+            workers--;
+            pump();
+        }
+    }
+
+    if (control.cancelled) {
+        // Cancelled synchronously from onControl, before scanning started.
+        finished = true;
+        resolveDone({
+            root,
+            fileCount: 0,
+            dirCount: 1,
+            totalBytes: 0,
+            largestFiles: [],
+            typeStats: []
+        });
+        return done;
+    }
+
+    scanStarted = true;
+    enqueue(root);
+    pump();
 
     return done;
 }

@@ -200,6 +200,11 @@ var selectedType = '';        // file extension filter for largest view ('' = al
 var isScanning = false;
 var isPaused = false;
 var lastTypeFilterKey = '';   // avoid rebuilding the type dropdown on every tick
+var currentTotalChildren = 0; // total immediate children for the current folder
+var lastBreadcrumbPath = null;
+var renderTimer = null;
+var lastRenderAt = 0;
+var MIN_RENDER_INTERVAL = 500; // ms between treemap refreshes while scanning
 
 var treemapDiv = document.getElementById('treemap');
 var tableView = document.getElementById('table-view');
@@ -211,6 +216,62 @@ var topnInput = document.getElementById('topn-input');
 var typeFilter = document.getElementById('type-filter');
 var pauseBtn = document.getElementById('pause-btn');
 var tabs = document.querySelectorAll('.tab');
+
+// ---- Render scheduling ----
+// Progress messages arrive every 150 ms; rendering a 2000-cell treemap can
+// take longer than that, so we throttle refreshView() to a trailing timer.
+
+function renderNow() {
+    if (renderTimer) {
+        clearTimeout(renderTimer);
+        renderTimer = null;
+    }
+    lastRenderAt = Date.now();
+    refreshView();
+}
+
+function scheduleRender() {
+    if (renderTimer) { return; }
+    var wait = Math.max(0, MIN_RENDER_INTERVAL - (Date.now() - lastRenderAt));
+    renderTimer = setTimeout(function () {
+        renderTimer = null;
+        renderNow();
+    }, wait);
+}
+
+// ---- Tooltip / delegated event helpers ----
+
+function getCellDatum(event) {
+    var target = event.target;
+    if (!target || !target.closest) { return null; }
+    var g = target.closest('g');
+    if (!g) { return null; }
+    return d3.select(g).datum();
+}
+
+function moveTooltip(event) {
+    var tx = event.clientX + 12;
+    var ty = event.clientY - 28;
+    tooltip.style.left = tx + 'px';
+    tooltip.style.top = ty + 'px';
+    var rect = tooltip.getBoundingClientRect();
+    var vw = window.innerWidth, vh = window.innerHeight;
+    if (rect.right > vw - 4) { tx = event.clientX - rect.width - 12; }
+    if (rect.bottom > vh - 4) { ty = event.clientY - rect.height - 8; }
+    if (ty < 4) { ty = 4; }
+    if (tx < 4) { tx = 4; }
+    tooltip.style.left = tx + 'px';
+    tooltip.style.top = ty + 'px';
+}
+
+function showTooltip(event, d) {
+    tooltip.classList.remove('hidden');
+    var icon = getNodeIcon(d.data);
+    var typeLabel = d.data.isDirectory ? 'Folder: ' : 'File: ';
+    tooltip.innerHTML = '<span class="codicon-icon">' + icon + '</span> ' + typeLabel + '<strong>' + d.data.name + '</strong><br>' +
+        formatSize(d.data.size) + ' (' + d.data.size.toLocaleString() + ' bytes)';
+    moveTooltip(event);
+}
 
 // ---- Render treemap (shared helper) ----
 
@@ -247,39 +308,48 @@ function renderTreemapSVG(dataArray, containerEl, getColorFn, onClickFn, onDblCl
         .attr('width', function(d) { return d.x1 - d.x0; })
         .attr('height', function(d) { return d.y1 - d.y0; })
         .attr('fill', function(d) { return getColorFn ? getColorFn(d.data) : getNodeColor(d.data); })
-        .attr('rx', 2)
-        .on('click', function(event, d) {
-            if (onClickFn) { onClickFn(d.data); }
-        })
-        .on('dblclick', function(event, d) {
-            if (onDblClickFn) { onDblClickFn(d.data); }
-        })
-        .on('contextmenu', function(event, d) {
-            event.preventDefault();
-            if (onDblClickFn) { onDblClickFn(d.data); }
-        })
-        .on('mouseenter', function(event, d) {
-            tooltip.classList.remove('hidden');
-            var icon = getNodeIcon(d.data);
-            var typeLabel = d.data.isDirectory ? 'Folder: ' : 'File: ';
-            tooltip.innerHTML = '<span class="codicon-icon">' + icon + '</span> ' + typeLabel + '<strong>' + d.data.name + '</strong><br>' +
-                formatSize(d.data.size) + ' (' + d.data.size.toLocaleString() + ' bytes)';
-        })
-        .on('mousemove', function(event) {
-            var tx = event.clientX + 12;
-            var ty = event.clientY - 28;
-            tooltip.style.left = tx + 'px';
-            tooltip.style.top = ty + 'px';
-            var rect = tooltip.getBoundingClientRect();
-            var vw = window.innerWidth, vh = window.innerHeight;
-            if (rect.right > vw - 4) { tx = event.clientX - rect.width - 12; }
-            if (rect.bottom > vh - 4) { ty = event.clientY - rect.height - 8; }
-            if (ty < 4) { ty = 4; }
-            if (tx < 4) { tx = 4; }
-            tooltip.style.left = tx + 'px';
-            tooltip.style.top = ty + 'px';
-        })
-        .on('mouseleave', function() { tooltip.classList.add('hidden'); });
+        .attr('rx', 2);
+
+    // One set of delegated listeners on the SVG instead of six listeners on
+    // every rect; this keeps 2000-cell renders from creating 12k handlers.
+    var hoverDatum = null;
+
+    svg.on('click', function(event) {
+        var d = getCellDatum(event);
+        if (d && onClickFn) { onClickFn(d.data); }
+    });
+
+    svg.on('dblclick', function(event) {
+        var d = getCellDatum(event);
+        if (d && onDblClickFn) { onDblClickFn(d.data); }
+    });
+
+    svg.on('contextmenu', function(event) {
+        var d = getCellDatum(event);
+        if (!d) { return; }
+        event.preventDefault();
+        if (onDblClickFn) { onDblClickFn(d.data); }
+    });
+
+    svg.on('mouseover', function(event) {
+        var d = getCellDatum(event);
+        if (!d) { return; }
+        hoverDatum = d;
+        showTooltip(event, d);
+    });
+
+    svg.on('mousemove', function(event) {
+        if (hoverDatum) { moveTooltip(event); }
+    });
+
+    svg.on('mouseout', function(event) {
+        var target = event.target;
+        var g = target && target.closest ? target.closest('g') : null;
+        var related = event.relatedTarget;
+        if (g && related && g.contains(related)) { return; }
+        hoverDatum = null;
+        tooltip.classList.add('hidden');
+    });
 
     // Name labels
     cell.append('text')
@@ -356,10 +426,12 @@ function renderStructure(topLevel) {
         return;
     }
 
+    var totalChildren = currentTotalChildren || items.length;
     var note = '';
-    if (items.length > MAX_RENDER_CELLS) {
-        note = 'Showing the top ' + MAX_RENDER_CELLS.toLocaleString() +
-            ' of ' + items.length.toLocaleString() + ' items';
+    if (items.length > MAX_RENDER_CELLS || totalChildren > items.length) {
+        var shown = Math.min(items.length, MAX_RENDER_CELLS);
+        note = 'Showing the top ' + shown.toLocaleString() +
+            ' of ' + totalChildren.toLocaleString() + ' items';
         items = items.slice(0, MAX_RENDER_CELLS);
     }
 
@@ -407,6 +479,13 @@ function renderFileTypes(stats) {
         return;
     }
 
+    var note = '';
+    if (arr.length > MAX_RENDER_CELLS) {
+        note = 'Showing the top ' + MAX_RENDER_CELLS.toLocaleString() +
+            ' of ' + arr.length.toLocaleString() + ' file types';
+        arr = arr.slice(0, MAX_RENDER_CELLS);
+    }
+
     renderTreemapSVG(arr, treemapDiv,
         function(d) { return EXT_COLORS[d.ext] || OTHER_COLOR; },
         function(d) {  // click: jump to Largest Files filtered by this type
@@ -414,7 +493,7 @@ function renderFileTypes(stats) {
             switchView('largest');
         }
     );
-    showNote('');
+    showNote(note);
 }
 
 // ---- View: Largest Files Table ----
@@ -573,6 +652,9 @@ function populateTypeFilter(stats) {
 // ---- Breadcrumb ----
 
 function renderBreadcrumb(dirPath) {
+    if (dirPath === lastBreadcrumbPath) { return; }
+    lastBreadcrumbPath = dirPath;
+
     if (!dirPath || dirPath === '/' || dirPath === '') {
         breadcrumb.innerHTML = '<span class="crumb" data-path="/">/</span>';
         return;
@@ -608,16 +690,18 @@ window.addEventListener('message', function(event) {
             isPaused = false;
             currentPath = msg.path;
             currentTopLevel = [];
+            currentTotalChildren = 0;
             totals = { fileCount: 0, dirCount: 0, totalBytes: 0 };
             renderBreadcrumb(msg.path);
             renderStatus();
             updatePauseButton();
-            refreshView();
+            renderNow();
             break;
         case 'progress':
             isScanning = true;
             currentPath = msg.currentPath;
             currentTopLevel = msg.topLevel || [];
+            currentTotalChildren = msg.totalChildren || currentTopLevel.length;
             typeStats = msg.typeStats || [];
             largestFiles = msg.largestFiles || [];
             totals = {
@@ -626,13 +710,14 @@ window.addEventListener('message', function(event) {
                 totalBytes: msg.totalBytes
             };
             renderStatus();
-            refreshView();
+            scheduleRender();
             break;
         case 'result':
             isScanning = false;
             isPaused = false;
             currentPath = msg.currentPath;
             currentTopLevel = msg.topLevel || [];
+            currentTotalChildren = msg.totalChildren || currentTopLevel.length;
             typeStats = msg.typeStats || [];
             largestFiles = msg.largestFiles || [];
             totals = {
@@ -642,16 +727,17 @@ window.addEventListener('message', function(event) {
             };
             renderStatus();
             updatePauseButton();
-            refreshView();
+            renderNow();
             break;
         case 'level':
             isScanning = false;
             isPaused = false;
             currentPath = msg.currentPath;
             currentTopLevel = msg.topLevel || [];
+            currentTotalChildren = msg.totalChildren || currentTopLevel.length;
             renderStatus();
             updatePauseButton();
-            refreshView();
+            renderNow();
             break;
         case 'pauseState':
             isPaused = !!msg.paused;
@@ -663,6 +749,11 @@ window.addEventListener('message', function(event) {
 
 // ---- Resize ----
 
+var resizeTimer = null;
 window.addEventListener('resize', function() {
-    refreshView();
+    if (resizeTimer) { clearTimeout(resizeTimer); }
+    resizeTimer = setTimeout(function() {
+        resizeTimer = null;
+        refreshView();
+    }, 200);
 });
