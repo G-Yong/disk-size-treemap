@@ -9,7 +9,7 @@ English | [中文](https://github.com/G-Yong/disk-size-treemap/blob/main/README_
 
 - 📁 **File Structure View** — Interactive squarified treemap showing files and folders proportional to their size. Click folders to drill down, click files to reveal in VS Code Explorer.
 - 🎨 **File Types View** — Aggregate treemap by file extension, showing which types consume the most disk space. Click any type to jump to its largest files.
-- 📊 **Largest Files View** — Sortable table of the largest files in the workspace, filterable by file type. Click rows to reveal in explorer.
+- 📊 **Largest Files View** — Table of the largest files, sorted by size and filterable by file type. Click rows to reveal in explorer.
 
 ![](image/operation.webp)
 
@@ -57,6 +57,13 @@ In the **Largest Files** view, use the dropdown to filter by a specific file ext
 - **Click** a folder in File Structure view to drill down
 - **Click** any file tile or table row to reveal it in the VS Code Explorer
 - Hover over tiles for detailed size information
+
+
+### Scan Controls
+
+While a scan is running, use the toolbar **Pause / Resume** button to pause or resume the scan. Use **Refresh** to manually rescan the current folder. The extension intentionally does not watch the filesystem — automatically rescanning a large tree would be too expensive.
+
+For very large folders, the treemap renders the top 2000 items by size to keep the UI responsive.
 
 ## Color Legend
 
